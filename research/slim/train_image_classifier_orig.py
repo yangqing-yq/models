@@ -24,19 +24,14 @@ from datasets import dataset_factory
 from deployment import model_deploy
 from nets import nets_factory
 from preprocessing import preprocessing_factory
-from tensorflow.contrib.framework.python.ops import variables
-from research.object_detection.core import prefetcher
-from data import dataset_data_provider
-#from tensorflow.python.training.training_util import create_global_step
 
-#slim = tf.contrib.slim
-
+slim = tf.contrib.slim
 
 tf.app.flags.DEFINE_string(
     'master', '', 'The address of the TensorFlow master to use.')
 
 tf.app.flags.DEFINE_string(
-    'train_dir', '/home/qing/out/tfmodel/', #store the ckpt
+    'train_dir', '/tmp/tfmodel/',
     'Directory where checkpoints and event logs are written to.')
 
 tf.app.flags.DEFINE_integer('num_clones', 1,
@@ -181,13 +176,13 @@ tf.app.flags.DEFINE_float(
 #######################
 
 tf.app.flags.DEFINE_string(
-    'dataset_name', 'flowers', 'The name of the dataset to load.')
+    'dataset_name', 'imagenet', 'The name of the dataset to load.')
 
 tf.app.flags.DEFINE_string(
     'dataset_split_name', 'train', 'The name of the train/test split.')
 
 tf.app.flags.DEFINE_string(
-    'dataset_dir', '/home/qing/data/flowers', 'The directory where the dataset files are stored.')
+    'dataset_dir', None, 'The directory where the dataset files are stored.')
 
 tf.app.flags.DEFINE_integer(
     'labels_offset', 0,
@@ -196,7 +191,7 @@ tf.app.flags.DEFINE_integer(
     'class for the ImageNet dataset.')
 
 tf.app.flags.DEFINE_string(
-    'model_name', 'mobilenet_v1', 'The name of the architecture to train.')
+    'model_name', 'resnet_v1_50', 'The name of the architecture to train.')
 
 tf.app.flags.DEFINE_string(
     'preprocessing_name', None, 'The name of the preprocessing to use. If left '
@@ -331,53 +326,53 @@ def _configure_optimizer(learning_rate):
     raise ValueError('Optimizer [%s] was not recognized' % FLAGS.optimizer)
   return optimizer
 
-# no check_point
-# def _get_init_fn():
-#   """Returns a function run by the chief worker to warm-start the training.
-#
-#   Note that the init_fn is only run when initializing the model during the very
-#   first global step.
-#
-#   Returns:
-#     An init function run by the supervisor.
-#   """
-#   if FLAGS.checkpoint_path is None:
-#     return None
-#
-#   # Warn the user if a checkpoint exists in the train_dir. Then we'll be
-#   # ignoring the checkpoint anyway.
-#   if tf.train.latest_checkpoint(FLAGS.train_dir):
-#     tf.logging.info(
-#         'Ignoring --checkpoint_path because a checkpoint already exists in %s'
-#         % FLAGS.train_dir)
-#     return None
-#
-#   exclusions = []
-#   if FLAGS.checkpoint_exclude_scopes:
-#     exclusions = [scope.strip()
-#                   for scope in FLAGS.checkpoint_exclude_scopes.split(',')]
-#
-#   # TODO(sguada) variables.filter_variables()
-#   variables_to_restore = []
-#   for var in slim.get_model_variables():
-#     for exclusion in exclusions:
-#       if var.op.name.startswith(exclusion):
-#         break
-#     else:
-#       variables_to_restore.append(var)
-#
-#   if tf.gfile.IsDirectory(FLAGS.checkpoint_path):
-#
-#   else:
-#     checkpoint_path = FLAGS.checkpoint_path
-#
-#   tf.logging.info('Fine-tuning from %s' % checkpoint_path)
-#
-#   return slim.assign_from_checkpoint_fn(
-#       checkpoint_path,
-#       variables_to_restore,
-#       ignore_missing_vars=FLAGS.ignore_missing_vars)
-#
+
+def _get_init_fn():
+  """Returns a function run by the chief worker to warm-start the training.
+
+  Note that the init_fn is only run when initializing the model during the very
+  first global step.
+
+  Returns:
+    An init function run by the supervisor.
+  """
+  if FLAGS.checkpoint_path is None:
+    return None
+
+  # Warn the user if a checkpoint exists in the train_dir. Then we'll be
+  # ignoring the checkpoint anyway.
+  if tf.train.latest_checkpoint(FLAGS.train_dir):
+    tf.logging.info(
+        'Ignoring --checkpoint_path because a checkpoint already exists in %s'
+        % FLAGS.train_dir)
+    return None
+
+  exclusions = []
+  if FLAGS.checkpoint_exclude_scopes:
+    exclusions = [scope.strip()
+                  for scope in FLAGS.checkpoint_exclude_scopes.split(',')]
+
+  # TODO(sguada) variables.filter_variables()
+  variables_to_restore = []
+  for var in slim.get_model_variables():
+    for exclusion in exclusions:
+      if var.op.name.startswith(exclusion):
+        break
+    else:
+      variables_to_restore.append(var)
+
+  if tf.gfile.IsDirectory(FLAGS.checkpoint_path):
+    checkpoint_path = tf.train.latest_checkpoint(FLAGS.checkpoint_path)
+  else:
+    checkpoint_path = FLAGS.checkpoint_path
+
+  tf.logging.info('Fine-tuning from %s' % checkpoint_path)
+
+  return slim.assign_from_checkpoint_fn(
+      checkpoint_path,
+      variables_to_restore,
+      ignore_missing_vars=FLAGS.ignore_missing_vars)
+
 
 def _get_variables_to_train():
   """Returns a list of variables to train.
@@ -415,9 +410,7 @@ def main(_):
 
     # Create global_step
     with tf.device(deploy_config.variables_device()):
-      #global_step = create_global_step()
-      #global_step=tf.Variable(0,trainable=False)
-      global_step = tf.contrib.framework.create_global_step()
+      global_step = slim.create_global_step()
 
     ######################
     # Select the dataset #
@@ -446,12 +439,11 @@ def main(_):
     # Create a dataset provider that loads data from the dataset #
     ##############################################################
     with tf.device(deploy_config.inputs_device()):
-      provider = dataset_data_provider.DatasetDataProvider(
+      provider = slim.dataset_data_provider.DatasetDataProvider(
           dataset,
           num_readers=FLAGS.num_readers,
           common_queue_capacity=20 * FLAGS.batch_size,
           common_queue_min=10 * FLAGS.batch_size)
-
       [image, label] = provider.get(['image', 'label'])
       label -= FLAGS.labels_offset
 
@@ -464,11 +456,10 @@ def main(_):
           batch_size=FLAGS.batch_size,
           num_threads=FLAGS.num_preprocessing_threads,
           capacity=5 * FLAGS.batch_size)
-      labels = tf.one_hot_encoding(
+      labels = slim.one_hot_encoding(
           labels, dataset.num_classes - FLAGS.labels_offset)
-      batch_queue = prefetcher.prefetch([images, labels], capacity=2 * deploy_config.num_clones)
-      # batch_queue = slim.prefetch_queue.prefetch_queue(
-      #     [images, labels], capacity=2 * deploy_config.num_clones)
+      batch_queue = slim.prefetch_queue.prefetch_queue(
+          [images, labels], capacity=2 * deploy_config.num_clones)
 
     ####################
     # Define the model #
@@ -481,14 +472,14 @@ def main(_):
       #############################
       # Specify the loss function #
       #############################
-      # if 'AuxLogits' in end_points:
-      #   slim.losses.softmax_cross_entropy(
-      #       end_points['AuxLogits'], labels,
-      #       label_smoothing=FLAGS.label_smoothing, weights=0.4,
-      #       scope='aux_loss')
-      # slim.losses.softmax_cross_entropy(
-      #     logits, labels, label_smoothing=FLAGS.label_smoothing, weights=1.0)
-      # return end_points
+      if 'AuxLogits' in end_points:
+        slim.losses.softmax_cross_entropy(
+            end_points['AuxLogits'], labels,
+            label_smoothing=FLAGS.label_smoothing, weights=0.4,
+            scope='aux_loss')
+      slim.losses.softmax_cross_entropy(
+          logits, labels, label_smoothing=FLAGS.label_smoothing, weights=1.0)
+      return end_points
 
     # Gather initial summaries.
     summaries = set(tf.get_collection(tf.GraphKeys.SUMMARIES))
@@ -512,14 +503,14 @@ def main(_):
       summaries.add(tf.summary.scalar('losses/%s' % loss.op.name, loss))
 
     # Add summaries for variables.
-    for variable in variables.get_model_variables():
+    for variable in slim.get_model_variables():
       summaries.add(tf.summary.histogram(variable.op.name, variable))
 
     #################################
     # Configure the moving averages #
     #################################
     if FLAGS.moving_average_decay:
-      moving_average_variables = variables.get_model_variables()
+      moving_average_variables = slim.get_model_variables()
       variable_averages = tf.train.ExponentialMovingAverage(
           FLAGS.moving_average_decay, global_step)
     else:
@@ -581,18 +572,18 @@ def main(_):
     ###########################
     # Kicks off the training. #
     ###########################
-    # slim.learning.train(
-    #     train_tensor,
-    #     logdir=FLAGS.train_dir,
-    #     master=FLAGS.master,
-    #     is_chief=(FLAGS.task == 0),
-    #     init_fn=_get_init_fn(),
-    #     summary_op=summary_op,
-    #     number_of_steps=FLAGS.max_number_of_steps,
-    #     log_every_n_steps=FLAGS.log_every_n_steps,
-    #     save_summaries_secs=FLAGS.save_summaries_secs,
-    #     save_interval_secs=FLAGS.save_interval_secs,
-    #     sync_optimizer=optimizer if FLAGS.sync_replicas else None)
+    slim.learning.train(
+        train_tensor,
+        logdir=FLAGS.train_dir,
+        master=FLAGS.master,
+        is_chief=(FLAGS.task == 0),
+        init_fn=_get_init_fn(),
+        summary_op=summary_op,
+        number_of_steps=FLAGS.max_number_of_steps,
+        log_every_n_steps=FLAGS.log_every_n_steps,
+        save_summaries_secs=FLAGS.save_summaries_secs,
+        save_interval_secs=FLAGS.save_interval_secs,
+        sync_optimizer=optimizer if FLAGS.sync_replicas else None)
 
 
 if __name__ == '__main__':
